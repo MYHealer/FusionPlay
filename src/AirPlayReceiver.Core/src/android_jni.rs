@@ -814,7 +814,45 @@ fn start_airkan(host: &mut AndroidHost, controller: ReceiverController, device_n
     if let Some(existing) = host.airkan.lock().expect("airkan").take() {
         existing.shutdown();
     }
-    let adapter = AirkanAdapter::new(Arc::new(controller.clone()));
+    let vm_ptr = VmPtr(host.vm.get_java_vm_pointer());
+
+    // 音量回调：通过 JNI 调用 AudioManager.adjustStreamVolume
+    let on_volume = {
+        let vm = vm_ptr;
+        move |delta: i32| {
+            let Ok(jvm) = (unsafe { JavaVM::from_raw(vm.0) }) else { return };
+            let Ok(mut env) = jvm.attach_current_thread() else { return };
+            // context = ActivityThread.currentApplication()
+            let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else { return };
+            let Ok(app) = env.call_static_method(
+                activity_thread, "currentApplication", "()Landroid/app/Application;", &[]
+            ) else { return };
+            let Ok(am_service) = env.call_method(
+                app.l().unwrap(), "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&env.new_string("audio").unwrap().into())]
+            ) else { return };
+            let am = am_service.l().unwrap();
+            // STREAM_MUSIC = 3, ADJUST_RAISE=1 / ADJUST_LOWER=-1, FLAG_SHOW_UI=1
+            let direction = if delta > 0 { 1 } else { -1 };
+            let _ = env.call_method(
+                am, "adjustStreamVolume", "(III)V",
+                &[JValue::Int(3), JValue::Int(direction), JValue::Int(1)],
+            );
+        }
+    };
+
+    // 退出回调：调 System.exit(0)
+    let on_exit = {
+        let vm = vm_ptr;
+        move || {
+            let Ok(jvm) = (unsafe { JavaVM::from_raw(vm.0) }) else { return };
+            let Ok(mut env) = jvm.attach_current_thread() else { return };
+            let Ok(sys) = env.find_class("java/lang/System") else { return };
+            let _ = env.call_static_method(sys, "exit", "(I)V", &[JValue::Int(0)]);
+        }
+    };
+
+    let adapter = AirkanAdapter::new(Arc::new(controller.clone()), Arc::new(on_volume), Arc::new(on_exit));
     let local_ip = host
         .miplay_identity
         .lock()

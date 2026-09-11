@@ -240,7 +240,7 @@ fn handle_rc_connection(mut stream: TcpStream, events: Arc<dyn RemoteControlEven
     let mut buf: Vec<u8> = Vec::new();
     let mut last_heartbeat = Instant::now();
     let mut handshake_done = false;
-    let mut ok_last: Option<Instant> = None;
+    let mut debounce: std::collections::HashMap<i32, Instant> = std::collections::HashMap::new();
     let mut rbuf = [0u8; 1024];
 
     loop {
@@ -292,7 +292,7 @@ fn handle_rc_connection(mut stream: TcpStream, events: Arc<dyn RemoteControlEven
                 }
                 proto::ty::KEY => {
                     if let Ok(f) = parse_key_frame(&owned) {
-                        dispatch_key(&f, &mut ok_last, events.as_ref());
+                        dispatch_key(&f, &mut debounce, events.as_ref());
                     }
                 }
                 proto::ty::HEARTBEAT => { /* 手机心跳，仅记录 */ }
@@ -304,19 +304,19 @@ fn handle_rc_connection(mut stream: TcpStream, events: Arc<dyn RemoteControlEven
     events.on_status(false);
 }
 
-fn dispatch_key(f: &crate::proto::AirkanFrame, ok_last: &mut Option<Instant>, events: &dyn RemoteControlEvents) {
+fn dispatch_key(f: &crate::proto::AirkanFrame, debounce: &mut std::collections::HashMap<i32, Instant>, events: &dyn RemoteControlEvents) {
     if f.code != 1 || f.key_action != 0 {
         return; // 仅按下
     }
-    let key = keymap(f.key_code, f.key_action);
-    // PlayPause 消抖（300ms）
-    if key == RemoteKey::PlayPause {
-        if let Some(t) = *ok_last {
-            if t.elapsed() < Duration::from_millis(300) {
-                return;
-            }
+    // 全键消抖（250ms）：手机遥控器连发多帧，同一 keyCode 250ms 内只处理一次。
+    let now = Instant::now();
+    if let Some(last) = debounce.get(&f.key_code) {
+        if now.duration_since(*last) < Duration::from_millis(250) {
+            return;
         }
-        *ok_last = Some(Instant::now());
     }
+    debounce.insert(f.key_code, now);
+
+    let key = keymap(f.key_code, f.key_action);
     events.on_key(key);
 }
