@@ -1,0 +1,52 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [feature/airkan]
+  workflow_dispatch:
+
+env:
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.32.8
+          cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - run: cargo install cargo-ndk
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          cmdline-tools-version: 11076708
+          packages: "platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358"
+
+      - name: Build APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+        working-directory: flutter
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fusionplay-airkan
+          path: flutter/build/app/outputs/flutter-apk/app-release.apk

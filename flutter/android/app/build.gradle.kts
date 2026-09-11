@@ -148,6 +148,9 @@ tasks.register("buildRustNative") {
     inputs.files(fileTree(repositoryRoot.dir("vendor/shairplay")) {
         include("Cargo.toml", "src/**")
     })
+    inputs.files(fileTree(repositoryRoot.dir("src/AirKanSdk")) {
+        include("Cargo.toml", "Cargo.lock", "src/**")
+    })
     outputs.dir(generatedNativeLibs)
     doLast {
         val ndk = ndkPath()
