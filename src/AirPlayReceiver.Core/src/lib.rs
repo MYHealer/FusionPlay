@@ -1,4 +1,5 @@
 mod audio;
+mod airkan_adapter;
 mod dlna;
 mod events;
 mod host;

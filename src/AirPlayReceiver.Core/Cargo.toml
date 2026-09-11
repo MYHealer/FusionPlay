@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aes = "0.9"
+airkan-sdk = { path = "../AirKanSdk" }
 anyhow = "1"
 base64 = "0.22"
 cbc = { version = "0.2", features = ["alloc"] }

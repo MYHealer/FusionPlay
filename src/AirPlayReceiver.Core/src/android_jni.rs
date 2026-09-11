@@ -1,3 +1,4 @@
+use crate::airkan_adapter::AirkanAdapter;
 use crate::events::{EventCallback, EventSink};
 use crate::host::{Settings, run_receiver_with_arbiter};
 use crate::network_identity::{
@@ -41,6 +42,7 @@ struct AndroidHost {
     miplay: Mutex<Option<MiPlayReceiver>>,
     miplay_controller: Mutex<Option<ReceiverController>>,
     miplay_identity: Mutex<Option<ActiveMiPlayIdentity>>,
+    airkan: Mutex<Option<airkan::AirkanServer>>,
 }
 
 #[derive(Default)]
@@ -476,6 +478,7 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
         miplay: Mutex::new(None),
         miplay_controller: Mutex::new(None),
         miplay_identity: Mutex::new(None),
+        airkan: Mutex::new(None),
     };
     *host_slot().lock().expect("host slot") = Some(host);
     std::mem::forget(global_context);
@@ -790,9 +793,11 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
         .with_initial_volume_percent(initial_volume_percent.clamp(0, 100) as u32);
     match MiPlayReceiver::start(config, events) {
         Ok(receiver) => {
-            *host.miplay_controller.lock().expect("controller") = Some(receiver.controller());
+            let controller = receiver.controller();
+            *host.miplay_controller.lock().expect("controller") = Some(controller.clone());
             *host.miplay.lock().expect("miplay") = Some(receiver);
             *host.miplay_identity.lock().expect("miplay identity") = Some(active_identity);
+            start_airkan(host, controller, &name);
             JObject::null().into_raw()
         }
         Err(error) => {
@@ -800,6 +805,26 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
             std::ptr::null_mut()
         }
     }
+}
+
+/// 在成功启动 MiPlay 后，用该播放器的控制器再拉起 airkan 遥控服务器，
+/// 使另一台小米手机可以用 airkan 遥控本设备（音量/暂停/切歌）。
+fn start_airkan(host: &mut AndroidHost, controller: ReceiverController, device_name: &str) {
+    // 上一个 airkan 服务器若在运行则先停掉，避免端口被占用。
+    if let Some(existing) = host.airkan.lock().expect("airkan").take() {
+        existing.shutdown();
+    }
+    let adapter = AirkanAdapter::new(Arc::new(controller.clone()));
+    let local_ip = host
+        .miplay_identity
+        .lock()
+        .expect("miplay identity")
+        .as_ref()
+        .map(|identity| identity.local_ip)
+        .unwrap_or(Ipv4Addr::UNSPECIFIED);
+    // device_id / tv_id：沿用接收器名称作为可读标识。
+    let server = airkan::server(local_ip, device_name.to_owned(), "airkantv".to_owned(), adapter);
+    *host.airkan.lock().expect("airkan") = Some(server);
 }
 
 #[unsafe(no_mangle)]
@@ -811,6 +836,9 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
     let Some(host) = slot.as_ref() else {
         return;
     };
+    if let Some(server) = host.airkan.lock().expect("airkan").take() {
+        server.shutdown();
+    }
     *host.miplay_controller.lock().expect("controller") = None;
     *host.miplay.lock().expect("miplay") = None;
     *host.miplay_identity.lock().expect("miplay identity") = None;

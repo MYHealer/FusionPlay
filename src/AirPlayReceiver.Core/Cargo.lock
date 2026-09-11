@@ -58,10 +58,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "airkan-sdk"
+version = "0.1.0"
+
+[[package]]
 name = "airplay-receiver-core"
 version = "1.0.4"
 dependencies = [
  "aes 0.9.1",
+ "airkan-sdk",
  "anyhow",
  "base64",
  "cbc",
