@@ -157,20 +157,30 @@ fn emit_java(vm: &JavaVM, callback: &GlobalRef, method: &str, line: &str, is_err
     }
 }
 
-#[derive(Clone, Copy)]
-struct VmPtr(*mut jni::sys::JavaVM);
-unsafe impl Send for VmPtr {}
-unsafe impl Sync for VmPtr {}
+/// 线程安全的 JavaVM 指针包装（AtomicPtr 天然 Send+Sync）。
+#[derive(Clone)]
+struct SafeVm(Arc<std::sync::atomic::AtomicPtr<jni::sys::JavaVM>>);
+unsafe impl Send for SafeVm {}
+unsafe impl Sync for SafeVm {}
+impl SafeVm {
+    fn new(vm: &JavaVM) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicPtr::new(vm.get_java_vm_pointer())))
+    }
+    fn get(&self) -> Option<JavaVM> {
+        let ptr = self.0.load(std::sync::atomic::Ordering::Acquire);
+        if ptr.is_null() { None } else { Some(unsafe { JavaVM::from_raw(ptr) }) }
+    }
+}
 
-fn core_callback(vm_ptr: VmPtr, callback: GlobalRef) -> EventCallback {
+fn core_callback(vm: SafeVm, callback: GlobalRef) -> EventCallback {
     Arc::new(move |line: String| {
-        emit_named(vm_ptr, &callback, "onCoreEvent", &line);
+        emit_named(&vm, &callback, "onCoreEvent", &line);
     })
 }
 
-fn emit_named(vm_ptr: VmPtr, callback: &GlobalRef, method: &str, line: &str) {
-    let vm = cloned_vm(vm_ptr.0);
-    emit_java(&vm, callback, method, line, false);
+fn emit_named(vm: &SafeVm, callback: &GlobalRef, method: &str, line: &str) {
+    let Some(jvm) = vm.get() else { return };
+    emit_java(&jvm, callback, method, line, false);
 }
 
 fn wrap_xiaomi_event(value: Value) -> String {
@@ -387,10 +397,6 @@ fn media_action(name: &str, position_ms: i64) -> Option<MediaAction> {
     }
 }
 
-fn cloned_vm(ptr: *mut jni::sys::JavaVM) -> JavaVM {
-    unsafe { JavaVM::from_raw(ptr).expect("JavaVM") }
-}
-
 fn optional_java_string(env: &mut JNIEnv, value: JString) -> Option<String> {
     if value.as_raw().is_null() {
         return None;
@@ -463,7 +469,7 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
         .with_writer(std::io::stderr)
         .try_init();
     let core_events = Arc::new(EventSink::with_callback(core_callback(
-        VmPtr(vm.get_java_vm_pointer()),
+        SafeVm::new(&vm),
         global_callback.clone(),
     )));
     let core_arbiter = Arc::new(PlaybackArbiter::new(Arc::clone(&core_events)));
@@ -759,7 +765,7 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
     *host.miplay_controller.lock().expect("controller") = None;
     *host.miplay.lock().expect("miplay") = None;
     *host.miplay_identity.lock().expect("miplay identity") = None;
-    let vm_ptr = VmPtr(host.vm.get_java_vm_pointer());
+    let vm_safe = SafeVm::new(&host.vm);
     let callback = host.callback.clone();
     let events: fusionplay_miplay_sdk::EventEmitter = Arc::new(move |value: Value| {
         // protocol_trace is a high-frequency wire dump used by the desktop
@@ -769,7 +775,7 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
             return;
         }
         emit_named(
-            vm_ptr,
+            &vm_safe,
             &callback,
             "onXiaomiEvent",
             &wrap_xiaomi_event(value),
@@ -810,50 +816,41 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
 /// 在成功启动 MiPlay 后，用该播放器的控制器再拉起 airkan 遥控服务器，
 /// 使另一台小米手机可以用 airkan 遥控本设备（音量/暂停/切歌）。
 fn start_airkan(host: &mut AndroidHost, controller: ReceiverController, device_name: &str) {
-    // 上一个 airkan 服务器若在运行则先停掉，避免端口被占用。
     if let Some(existing) = host.airkan.lock().expect("airkan").take() {
         existing.shutdown();
     }
-    let vm_ptr = VmPtr(host.vm.get_java_vm_pointer());
+    let vm = SafeVm::new(&host.vm);
 
     // 音量回调：通过 JNI 调用 AudioManager.adjustStreamVolume
-    let on_volume = {
-        let vm = vm_ptr;
-        move |delta: i32| {
-            let Ok(jvm) = (unsafe { JavaVM::from_raw(vm.0) }) else { return };
-            let Ok(mut env) = jvm.attach_current_thread() else { return };
-            let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else { return };
-            let Ok(app) = env.call_static_method(
-                activity_thread, "currentApplication", "()Landroid/app/Application;", &[]
-            ) else { return };
-            let Ok(app_obj) = app.l() else { return };
-            let audio_str = match env.new_string("audio") {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let Ok(am_service) = env.call_method(
-                app_obj, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
-                &[JValue::Object(audio_str.as_ref())]
-            ) else { return };
-            let Ok(am) = am_service.l() else { return };
-            // STREAM_MUSIC = 3, ADJUST_RAISE=1 / ADJUST_LOWER=-1, FLAG_SHOW_UI=1
-            let direction = if delta > 0 { 1 } else { -1 };
-            let _ = env.call_method(
-                am, "adjustStreamVolume", "(III)V",
-                &[JValue::Int(3), JValue::Int(direction), JValue::Int(1)],
-            );
-        }
+    let vm_vol = vm.clone();
+    let on_volume = move |delta: i32| {
+        let Some(jvm) = vm_vol.get() else { return };
+        let Ok(mut env) = jvm.attach_current_thread() else { return };
+        let Ok(activity_thread) = env.find_class("android/app/ActivityThread") else { return };
+        let Ok(app) = env.call_static_method(
+            activity_thread, "currentApplication", "()Landroid/app/Application;", &[]
+        ) else { return };
+        let Ok(app_obj) = app.l() else { return };
+        let Ok(audio_str) = env.new_string("audio") else { return };
+        let Ok(am_service) = env.call_method(
+            app_obj, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+            &[JValue::Object(audio_str.as_ref())]
+        ) else { return };
+        let Ok(am) = am_service.l() else { return };
+        let direction = if delta > 0 { 1 } else { -1 };
+        let _ = env.call_method(
+            am, "adjustStreamVolume", "(III)V",
+            &[JValue::Int(3), JValue::Int(direction), JValue::Int(1)],
+        );
     };
 
     // 退出回调：调 System.exit(0)
-    let on_exit = {
-        let vm = vm_ptr;
-        move || {
-            let Ok(jvm) = (unsafe { JavaVM::from_raw(vm.0) }) else { return };
-            let Ok(mut env) = jvm.attach_current_thread() else { return };
-            let Ok(sys) = env.find_class("java/lang/System") else { return };
-            let _ = env.call_static_method(sys, "exit", "(I)V", &[JValue::Int(0)]);
-        }
+    let vm_exit = vm.clone();
+    let on_exit = move || {
+        let Some(jvm) = vm_exit.get() else { return };
+        let Ok(mut env) = jvm.attach_current_thread() else { return };
+        let Ok(sys) = env.find_class("java/lang/System") else { return };
+        let _ = env.call_static_method(sys, "exit", "(I)V", &[JValue::Int(0)]);
     };
 
     let adapter = AirkanAdapter::new(Arc::new(controller.clone()), Arc::new(on_volume), Arc::new(on_exit));
