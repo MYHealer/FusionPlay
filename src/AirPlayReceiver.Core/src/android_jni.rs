@@ -168,7 +168,7 @@ impl SafeVm {
     }
     fn get(&self) -> Option<JavaVM> {
         let ptr = self.0.load(std::sync::atomic::Ordering::Acquire);
-        if ptr.is_null() { None } else { Some(unsafe { JavaVM::from_raw(ptr) }) }
+        if ptr.is_null() { None } else { JavaVM::from_raw(ptr).ok() }
     }
 }
 
