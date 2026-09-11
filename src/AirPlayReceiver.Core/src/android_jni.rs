@@ -786,7 +786,7 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
             .or(interface_eui64_hardware_address.as_deref())
             .is_some_and(|address| address == active_identity.hardware_address),
     }));
-    let config = ReceiverConfig::new(name, identity, local_ip, interface_name)
+    let config = ReceiverConfig::new(name.clone(), identity, local_ip, interface_name)
         .with_device_type(device_type)
         .with_output_device(output_device)
         .with_hardware_address(Some(active_identity.hardware_address.clone()))

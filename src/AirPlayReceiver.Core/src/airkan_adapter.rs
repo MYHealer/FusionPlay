@@ -5,7 +5,7 @@
 //! [`RemoteControlEvents::on_key`]，这里把它们映射成对本地播放器/音量的操作。
 
 use airkan::RemoteControlEvents;
-use fusionplay_miplay_sdk::MediaAction;
+use fusionplay_miplay_sdk::{MediaAction, ReceiverController};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
