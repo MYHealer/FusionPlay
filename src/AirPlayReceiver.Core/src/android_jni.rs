@@ -161,6 +161,7 @@ fn emit_java(vm: &JavaVM, callback: &GlobalRef, method: &str, line: &str, is_err
 struct VmPtr(*mut jni::sys::JavaVM);
 unsafe impl Send for VmPtr {}
 unsafe impl Sync for VmPtr {}
+unsafe impl Sync for VmPtr {}
 
 fn core_callback(vm_ptr: VmPtr, callback: GlobalRef) -> EventCallback {
     Arc::new(move |line: String| {
